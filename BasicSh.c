@@ -1,3 +1,4 @@
+#include <fcntl.h>
 #include <readline/history.h>
 #include <readline/readline.h>
 #include <stdio.h>
@@ -11,15 +12,19 @@
 #define ARG_BUFSIZE 64          // Max number of supported arg
 #define ARG_DELIM " \t\r\n\a"
 
-int cd(char* argPath, char* cwd);
+void cd(char* argPath, char* cwd);
 char** parseCMD(char* cmd_buff);
 char* buildPrompt(char* prompt, char* hostname, char* path);
+int isBuiltIn(char** args);
+void runBuiltIn(char** args, char* path);
 
 int main() {
   char* cmd_buff;
   char path[PATH_MAX];
   char hostname[MACHINE_LENGTH_MAX];
   char prompt[PROMPT_LENGTH];
+  int childPid;
+  int isBackground = 0;
 
   // Get the host name
   gethostname(hostname, MACHINE_LENGTH_MAX);
@@ -43,24 +48,47 @@ int main() {
     // Parse cmd_buff
     char** args = parseCMD(cmd_buff);
     // Sanity check
-    if(args[0] == NULL){
+    if (args[0] == NULL) {
       printf("Enter a valid command!\n");
       continue;
     }
 
-    // command
-    if (!strcmp(args[0], "ifconfig")) {
-      system("ifconfig");
-    } else if (!strcmp(args[0], "date")) {
-      system("date");
-    } else if (!strcmp(args[0], "ls")) {
-      system("ls");
-    } else if (!strcmp(args[0], "cd")) {
-      if(cd(args[1], path) == -1){ 
-        printf("Enter a valid path!\n");
+    if (isBuiltIn(args)) {
+      if (!strcmp(args[0], "cd")) {
+        cd(args[1], path);
+      } else if (!strcmp(args[0], "ls")) {
+        system("ls");
+      } else if (!strcmp(args[0], "exit")) {
+        printf("Exiting...\n");
+        free(args);
+        // free(cmd_buff);
+        break;
+      } else if (!strcmp(args[0], "jobs")) {
+      } else if (!strcmp(args[0], "history")) {
+      } else if (!strcmp(args[0], "kill")) {
+      } else if (!strcmp(args[0], "!")) {
       }
-    } else if (!strcmp(args[0], "exit") || !strcmp(cmd_buff, "quit")) {
-      break;
+      continue;
+    }
+    // Check whether the job is a background job or not
+    int index = 0;
+    char* prevArg = NULL;
+    while(args[index+1] != NULL){
+      index++;
+    }
+    isBackground = strcmp(args[index], "&") ? 0:1;
+
+    // Create a fork and execute the user command
+    childPid = fork();
+    if (childPid == -1) {
+      // ERR
+      printf("ERROR...");
+      exit(EXIT_FAILURE);
+    } else if (childPid == 0) {
+      // child
+    } else{
+      // Check whether the child process is a background job
+
     }
 
     // free(cmd_buff);
@@ -69,16 +97,27 @@ int main() {
   return 0;
 }
 
+int isBuiltIn(char** args) {
+  if (args[0] == NULL) return 0;
+  if (!strcmp(args[0], "cd") || !strcmp(args[0], "ls") ||
+      !strcmp(args[0], "exit") || !strcmp(args[0], "jobs") ||
+      !strcmp(args[0], "history") || !strcmp(args[0], "kill") ||
+      !strcmp(args[0], "!"))
+    return 1;
+
+  return 0;
+}
+
 // Returns pointer to prompt
-char* buildPrompt(char* prompt, char* hostname, char* path){
+char* buildPrompt(char* prompt, char* hostname, char* path) {
   // Build the prompt (with colors!)
-  strcpy(prompt, "\033[1;32m"); // Bold green
+  strcpy(prompt, "\033[1;32m");  // Bold green
   strcat(prompt, hostname);
   strcat(prompt, ": ");
-  strcat(prompt, "\033[1;34m"); // Bold Blue
+  strcat(prompt, "\033[1;34m");  // Bold Blue
   strcat(prompt, path);
   strcat(prompt, ">>");
-  strcat(prompt, "\033[0m"); // Reset 
+  strcat(prompt, "\033[0m");  // Reset
   return prompt;
 }
 
@@ -105,19 +144,26 @@ char** parseCMD(char* cmd_buff) {
 
 // changes current directory
 // Supports both relative and absolute paths
-int cd(char* argPath, char* cwd) {
-  if(argPath == NULL) return -1;
+void cd(char* argPath, char* cwd) {
+  if (argPath == NULL) {
+    printf("Enter a valid path!");
+    return;
+  }
 
   char path[PATH_MAX];
   strcpy(path, argPath);
 
+  int status = 0;
   if (argPath[0] != '/') {
     // Handle relative paths
     strcat(cwd, "/");
     strcat(cwd, path);
-    return chdir(cwd);
+    status = chdir(cwd);
   } else {
     // Handle absolute paths
-    return chdir(argPath);
+    status = chdir(argPath);
+  }
+  if (status == -1) {
+    printf("Enter a valid path!");
   }
 }

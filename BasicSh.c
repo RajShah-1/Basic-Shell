@@ -32,7 +32,6 @@ typedef struct {
 } Queue;
 
 // Global Variables
-Queue history;
 Queue jobs;
 
 void cd(char* argPath, char* cwd);
@@ -62,10 +61,12 @@ int main() {
   pid_t childPid;
   int historyID;
 
+  Queue history;
   history.front = history.back = NULL;
   history.processID = history.size = 0;
   history.maxSize = MAX_HIST;
 
+  // jobs is a global variable (Because sigchldHandler needs to modify it)
   jobs.front = jobs.back = NULL;
   jobs.processID = jobs.size = 0;
   jobs.maxSize = MAX_BG_PROCS;
@@ -104,6 +105,7 @@ int main() {
       continue;
     }
 
+    // If ! is used fetch the command from history
     if (args[0][0] == '!') {
       char* tmp = args[0] + 1;
       historyID = atoi(tmp);
@@ -115,23 +117,28 @@ int main() {
         continue;
       }
       strcpy(cmd_buff_tmp, cmd_buff);
+      strcpy(cmd_buff_args, cmd_buff);
+      // Save value of this command to history
       enqueue(&history, cmd_buff_tmp, -1);
 
-      printf("Executing: %s\n", cmd_buff_tmp);
-      args = parseCMD(cmd_buff_tmp);
+      printf("Executing: %s\n", cmd_buff_args);
+      args = parseCMD(cmd_buff_args);
       if (args[0] == NULL) {
         continue;
       }
     } else {
+      // Add current cmd_buff to history queue
       enqueue(&history, cmd_buff_tmp, -1);
     }
 
+    // Check for built in commands
     if (isBuiltIn(args)) {
       if (!strcmp(args[0], "cd")) {
         cd(args[1], path);
       } else if (!strcmp(args[0], "ls")) {
         system("ls");
       } else if (!strcmp(args[0], "exit")) {
+        // Check for background jobs
         if (jobs.size != 0) {
           printf("There are %d process(es) running in the background. ",
                  jobs.size);
@@ -149,13 +156,13 @@ int main() {
       } else if (!strcmp(args[0], "history")) {
         printHistory(&history);
       } else if (!strcmp(args[0], "kill")) {
-        // Kill the child!
         if (args[1] == NULL || args[1][0] != '%') {
           printf("Invalid args\n");
         } else if (kill(atoi(args[1] + 1), SIGKILL) == -1) {
           printf("Invalid pid/permission denied\n");
         }
       }
+      // Skip user command part
       continue;
     }
 
@@ -168,24 +175,27 @@ int main() {
     } else if (childPid == 0) {
       // child
       execUserProcess(args);
-      return 0;
     } else {
       // Check whether the child process is a background job
       if (isBackgroundJob(args)) {
         // Record as a background process
         printf("Background Process started\n");
-        enqueue(&jobs, cmd_buff, childPid);
+        enqueue(&jobs, cmd_buff_tmp, childPid);
       } else {
+        // Wait for the child to terminate
         waitpid(childPid, NULL, 0);
       }
     }
+    // Avoids memory leaks
     free(args);
   }
   return 0;
 }
 
+// Execute user process
+// This fn will be called by the child
 void execUserProcess(char** args) {
-  // Open infile and outfile
+  // Open infile and outfile if specified
   FILE *fd1 = NULL, *fd0 = NULL;
   int i = 0;
   while (args[i] != NULL) {
@@ -198,7 +208,7 @@ void execUserProcess(char** args) {
         exit(EXIT_FAILURE);
       }
       dup2(fileno(fd1), STDOUT_FILENO);
-      fclose(fd1);  
+      fclose(fd1);
     }
 
     if (strcmp(args[i], "<") == 0) {
@@ -215,96 +225,17 @@ void execUserProcess(char** args) {
     i++;
   }
 
-  execvp(args[0], args);
+  // Execute the command
+  if (execvp(args[0], args) == -1) {
+    // execvp failed
+    printf("Invalid command!\n");
+    exit(EXIT_FAILURE);
+  };
+  exit(EXIT_SUCCESS);
 }
 
-// Queue operations
-void enqueue(Queue* Q, const char* cmd_buff, pid_t pid) {
-  procInfo* newProc = newProcNode(cmd_buff, pid, Q->processID++);
-
-  if (Q->front == NULL) {
-    Q->size++;
-    Q->back = Q->front = newProc;
-    return;
-  }
-
-  if (Q->size >= Q->maxSize) {
-    procInfo* tmp = Q->front;
-    Q->front = Q->front->next;
-    free(tmp);
-    Q->size--;
-  }
-
-  Q->size++;
-  Q->back->next = newProc;
-  Q->back = Q->back->next;
-}
-
-void removePID(Queue* Q, pid_t pid) {
-  // Find and delete the node with pid == pid
-  if (Q->front == NULL) {
-    printf("Warning: Empty queue!");
-    return;
-  }
-
-  procInfo *curr = Q->front, *prev;
-  if (curr->pid == pid) {
-    procInfo* tmp = curr;
-    Q->front = Q->front->next;
-    if (Q->front == NULL) {
-      Q->back = NULL;
-    }
-    free(tmp);
-    Q->size--;
-    return;
-  }
-
-  while (curr && curr->pid != pid) {
-    prev = curr;
-    curr = curr->next;
-  }
-  if (curr == NULL) {
-    printf("Warning: pid not found!");
-    return;
-  }
-  Q->size--;
-  prev->next = curr->next;
-  free(curr);
-  if (prev->next == NULL) {
-    Q->back = prev;
-  }
-}
-
-char* getPrevCMD(Queue* Q, int id) {
-  if (Q->front == NULL) return NULL;
-  if (id == -1) return Q->back->cmd_buff;
-
-  procInfo* tmp = Q->front;
-  while (tmp) {
-    if (tmp->id == id) return tmp->cmd_buff;
-    tmp = tmp->next;
-  }
-  return NULL;
-}
-
-void printJobs(Queue* Q) {
-  procInfo* tmp = Q->front;
-  printf("Background jobs: \n");
-  while (tmp) {
-    printf("NUM(pid): %d - %s\n", tmp->pid, tmp->cmd_buff);
-    tmp = tmp->next;
-  }
-}
-
-void printHistory(Queue* Q) {
-  procInfo* tmp = Q->front;
-  printf("%d Previous Commands: \n", Q->size);
-  while (tmp) {
-    printf("ID: %d - %s\n", tmp->id, tmp->cmd_buff);
-    tmp = tmp->next;
-  }
-}
-
+// Checks whether the current args specify a background process or not
+// Background processes has '&' at the end
 int isBackgroundJob(char** args) {
   int index = 0;
   char* prevArg = NULL;
@@ -312,16 +243,6 @@ int isBackgroundJob(char** args) {
     index++;
   }
   return strcmp(args[index], "&") ? 0 : 1;
-}
-
-procInfo* newProcNode(const char* cmd_buff, pid_t pid, int id) {
-  procInfo* newProc = (procInfo*)malloc(sizeof(procInfo));
-  strcpy(newProc->cmd_buff, cmd_buff);
-  newProc->id = id;
-  newProc->pid = pid;
-  newProc->next = NULL;
-
-  return newProc;
 }
 
 // Checks whether args[0] is a builtin command or not
@@ -405,4 +326,114 @@ void sigchldHandler(int signum) {
     }
     removePID(&jobs, pid);
   }
+}
+
+// =================== Queue operations =================
+
+// Enqueue an entry to the queue
+// If the queue is full this fn will pop the front element
+// and push the new element at back
+void enqueue(Queue* Q, const char* cmd_buff, pid_t pid) {
+  procInfo* newProc = newProcNode(cmd_buff, pid, Q->processID++);
+  if (Q->front == NULL) {
+    Q->size++;
+    Q->back = Q->front = newProc;
+    return;
+  }
+
+  if (Q->size >= Q->maxSize) {
+    procInfo* tmp = Q->front;
+    Q->front = Q->front->next;
+    free(tmp);
+    Q->size--;
+  }
+
+  Q->size++;
+  Q->back->next = newProc;
+  Q->back = Q->back->next;
+}
+
+
+// Here, queue is treated as a linked list 
+// It removes the node with pid = pid
+void removePID(Queue* Q, pid_t pid) {
+  // Find and delete the node with pid == pid
+  if (Q->front == NULL) {
+    printf("Warning: Empty queue!");
+    return;
+  }
+
+  procInfo *curr = Q->front, *prev;
+  if (curr->pid == pid) {
+    procInfo* tmp = curr;
+    Q->front = Q->front->next;
+    if (Q->front == NULL) {
+      Q->back = NULL;
+    }
+    free(tmp);
+    Q->size--;
+    return;
+  }
+
+  while (curr && curr->pid != pid) {
+    prev = curr;
+    curr = curr->next;
+  }
+  if (curr == NULL) {
+    printf("Warning: pid not found!");
+    return;
+  }
+  Q->size--;
+  prev->next = curr->next;
+  free(curr);
+  if (prev->next == NULL) {
+    Q->back = prev;
+  }
+}
+
+// Return the cmd_buff of the node with id == id
+// Return NULL is such node is not found
+char* getPrevCMD(Queue* Q, int id) {
+  if (Q->front == NULL) return NULL;
+  if (id == -1) return Q->back->cmd_buff;
+
+  procInfo* tmp = Q->front;
+  while (tmp) {
+    if (tmp->id == id) return tmp->cmd_buff;
+    tmp = tmp->next;
+  }
+  return NULL;
+}
+
+// Prints each node's pid and cmd_buff
+// Used when Q is used as jobs 
+void printJobs(Queue* Q) {
+  procInfo* tmp = Q->front;
+  printf("Background jobs: \n");
+  while (tmp) {
+    printf("NUM(pid): %d - %s\n", tmp->pid, tmp->cmd_buff);
+    tmp = tmp->next;
+  }
+}
+
+// Prints each node's id and cmd_buff
+// Used when Q is used as history
+void printHistory(Queue* Q) {
+  procInfo* tmp = Q->front;
+  printf("%d Previous Commands: \n", Q->size);
+  while (tmp) {
+    printf("ID: %d - %s\n", tmp->id, tmp->cmd_buff);
+    tmp = tmp->next;
+  }
+}
+
+// Utility function to dynamically construct a new procInfo struct 
+procInfo* newProcNode(const char* cmd_buff, pid_t pid, int id) {
+  procInfo* newProc = (procInfo*)malloc(sizeof(procInfo));
+  strcpy(newProc->cmd_buff, cmd_buff);
+  newProc->id = id;
+  newProc->pid = pid;
+  newProc->next = NULL;
+
+  return newProc;
 }

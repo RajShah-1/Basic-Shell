@@ -14,7 +14,7 @@
 #define ARG_BUFSIZE 64          // Max number of supported arg
 #define ARG_DELIM " \t\r\n\a"   // Delimeters to seperate args
 #define MAX_BG_PROCS 100        // Max num of background jobs at any given time
-#define MAX_HIST 4  // Max num of history entries stored in the queue
+#define MAX_HIST 10  // Max num of history entries stored in the queue
 
 typedef struct procInfo {
   char cmd_buff[CMD_MAX];
@@ -42,8 +42,10 @@ int isBuiltIn(char** args);
 void runBuiltIn(char** args, char* path);
 int isBackgroundJob(char** args);
 void sigchldHandler(int sigNum);
+void execUserProcess(char** args);
 
 // Queue operations
+procInfo* newProcNode(const char* cmd_buff, pid_t pid, int id);
 void enqueue(Queue* Q, const char* cmd_buff, pid_t pid);
 void removePID(Queue* Q, pid_t pid);
 char* getPrevCMD(Queue* Q, int id);
@@ -53,6 +55,7 @@ void printHistory(Queue* Q);
 int main() {
   char* cmd_buff;
   char cmd_buff_tmp[CMD_MAX];
+  char cmd_buff_args[CMD_MAX];
   char path[PATH_MAX];
   char hostname[MACHINE_LENGTH_MAX];
   char prompt[PROMPT_LENGTH];
@@ -82,6 +85,7 @@ int main() {
 
     cmd_buff = readline(buildPrompt(prompt, hostname, path));
     strcpy(cmd_buff_tmp, cmd_buff);
+    strcpy(cmd_buff_args, cmd_buff);
 
     // Support up and down arrows to show previously used commands
     if (strlen(cmd_buff) > 0) {
@@ -89,8 +93,11 @@ int main() {
       add_history(cmd_buff);
     }
 
+    // free cmd_buff (allocated by readLine library)
+    free(cmd_buff);
+
     // Parse cmd_buff
-    char** args = parseCMD(cmd_buff);
+    char** args = parseCMD(cmd_buff_args);
     // Sanity check
     if (args[0] == NULL) {
       printf("Enter a valid command!\n");
@@ -109,13 +116,13 @@ int main() {
       }
       strcpy(cmd_buff_tmp, cmd_buff);
       enqueue(&history, cmd_buff_tmp, -1);
-      
+
       printf("Executing: %s\n", cmd_buff_tmp);
       args = parseCMD(cmd_buff_tmp);
       if (args[0] == NULL) {
         continue;
       }
-    } else{
+    } else {
       enqueue(&history, cmd_buff_tmp, -1);
     }
 
@@ -125,15 +132,29 @@ int main() {
       } else if (!strcmp(args[0], "ls")) {
         system("ls");
       } else if (!strcmp(args[0], "exit")) {
-        printf("Exiting...\n");
-        free(args);
-        // free(cmd_buff);
-        break;
+        if (jobs.size != 0) {
+          printf("There are %d process(es) running in the background. ",
+                 jobs.size);
+          printf("Run jobs command to view them. ");
+          printf(
+              "You must kill them/ wait for their completion before exting the "
+              "shell.\n");
+        } else {
+          printf("Exiting...\n");
+          free(args);
+          break;
+        }
       } else if (!strcmp(args[0], "jobs")) {
         printJobs(&jobs);
       } else if (!strcmp(args[0], "history")) {
         printHistory(&history);
       } else if (!strcmp(args[0], "kill")) {
+        // Kill the child!
+        if (args[1] == NULL || args[1][0] != '%') {
+          printf("Invalid args\n");
+        } else if (kill(atoi(args[1] + 1), SIGKILL) == -1) {
+          printf("Invalid pid/permission denied\n");
+        }
       }
       continue;
     }
@@ -146,7 +167,8 @@ int main() {
       exit(EXIT_FAILURE);
     } else if (childPid == 0) {
       // child
-      execvp(args[0], args);
+      execUserProcess(args);
+      return 0;
     } else {
       // Check whether the child process is a background job
       if (isBackgroundJob(args)) {
@@ -157,40 +179,63 @@ int main() {
         waitpid(childPid, NULL, 0);
       }
     }
-
-    // free(cmd_buff);
     free(args);
   }
   return 0;
 }
 
-procInfo* newProcNode(const char* cmd_buff, pid_t pid, int id) {
-  procInfo* newProc = (procInfo*)malloc(sizeof(procInfo));
-  strcpy(newProc->cmd_buff, cmd_buff);
-  newProc->id = id;
-  newProc->pid = pid;
-  newProc->next = NULL;
+void execUserProcess(char** args) {
+  // Open infile and outfile
+  FILE *fd1 = NULL, *fd0 = NULL;
+  int i = 0;
+  while (args[i] != NULL) {
+    if (strcmp(args[i], ">") == 0) {
+      fd1 = fopen(args[i + 1], "w");
+      // printf("Outfile: %s\n", args[i + 1]);
+      if (fd1 == NULL) {
+        printf("Can't open the file!\n");
+        printf("Terminating the process...\n");
+        exit(EXIT_FAILURE);
+      }
+      dup2(fileno(fd1), STDOUT_FILENO);
+      fclose(fd1);  
+    }
 
-  return newProc;
+    if (strcmp(args[i], "<") == 0) {
+      fd0 = fopen(args[i + 1], "r");
+      // printf("Infile: %s\n", args[i + 1]);
+      if (fd0 == NULL) {
+        printf("Can't open the file\n");
+        printf("Terminating the process...\n");
+        exit(0);
+      }
+      dup2(fileno(fd0), STDIN_FILENO);
+      fclose(fd0);
+    }
+    i++;
+  }
+
+  execvp(args[0], args);
 }
 
 // Queue operations
 void enqueue(Queue* Q, const char* cmd_buff, pid_t pid) {
   procInfo* newProc = newProcNode(cmd_buff, pid, Q->processID++);
-  Q->size++;
 
   if (Q->front == NULL) {
+    Q->size++;
     Q->back = Q->front = newProc;
     return;
   }
 
-  if (Q->size > Q->maxSize) {
-    printf("Removing front!\n");
+  if (Q->size >= Q->maxSize) {
     procInfo* tmp = Q->front;
     Q->front = Q->front->next;
     free(tmp);
+    Q->size--;
   }
 
+  Q->size++;
   Q->back->next = newProc;
   Q->back = Q->back->next;
 }
@@ -210,6 +255,7 @@ void removePID(Queue* Q, pid_t pid) {
       Q->back = NULL;
     }
     free(tmp);
+    Q->size--;
     return;
   }
 
@@ -221,6 +267,7 @@ void removePID(Queue* Q, pid_t pid) {
     printf("Warning: pid not found!");
     return;
   }
+  Q->size--;
   prev->next = curr->next;
   free(curr);
   if (prev->next == NULL) {
@@ -251,7 +298,7 @@ void printJobs(Queue* Q) {
 
 void printHistory(Queue* Q) {
   procInfo* tmp = Q->front;
-  printf("Previous Commands: \n");
+  printf("%d Previous Commands: \n", Q->size);
   while (tmp) {
     printf("ID: %d - %s\n", tmp->id, tmp->cmd_buff);
     tmp = tmp->next;
@@ -265,6 +312,16 @@ int isBackgroundJob(char** args) {
     index++;
   }
   return strcmp(args[index], "&") ? 0 : 1;
+}
+
+procInfo* newProcNode(const char* cmd_buff, pid_t pid, int id) {
+  procInfo* newProc = (procInfo*)malloc(sizeof(procInfo));
+  strcpy(newProc->cmd_buff, cmd_buff);
+  newProc->id = id;
+  newProc->pid = pid;
+  newProc->next = NULL;
+
+  return newProc;
 }
 
 // Checks whether args[0] is a builtin command or not

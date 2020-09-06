@@ -14,7 +14,7 @@
 #define ARG_BUFSIZE 64          // Max number of supported arg
 #define ARG_DELIM " \t\r\n\a"   // Delimeters to seperate args
 #define MAX_BG_PROCS 100        // Max num of background jobs at any given time
-#define MAX_HIST 10  // Max num of history entries stored in the queue
+#define MAX_HIST 4  // Max num of history entries stored in the queue
 
 typedef struct procInfo {
   char cmd_buff[CMD_MAX];
@@ -52,7 +52,7 @@ void printHistory(Queue* Q);
 
 int main() {
   char* cmd_buff;
-  char cmd_buff_org[CMD_MAX];
+  char cmd_buff_tmp[CMD_MAX];
   char path[PATH_MAX];
   char hostname[MACHINE_LENGTH_MAX];
   char prompt[PROMPT_LENGTH];
@@ -81,7 +81,7 @@ int main() {
     }
 
     cmd_buff = readline(buildPrompt(prompt, hostname, path));
-    strcpy(cmd_buff_org, cmd_buff);
+    strcpy(cmd_buff_tmp, cmd_buff);
 
     // Support up and down arrows to show previously used commands
     if (strlen(cmd_buff) > 0) {
@@ -107,19 +107,17 @@ int main() {
         printf("Command does not exist in the history!\n");
         continue;
       }
-      strcpy(cmd_buff_org, cmd_buff);
-      printf("Executing: %s\n", cmd_buff);
-      // If we pass cmd_buff to parseCMD we'll end up mutating the cmd_buff entry 
-      // in the history queue
-      // So pass cmd_buff_org to parseCMD and then restore it from cmd_buff
-      args = parseCMD(cmd_buff_org);
-      strcpy(cmd_buff_org, cmd_buff);
+      strcpy(cmd_buff_tmp, cmd_buff);
+      enqueue(&history, cmd_buff_tmp, -1);
+      
+      printf("Executing: %s\n", cmd_buff_tmp);
+      args = parseCMD(cmd_buff_tmp);
       if (args[0] == NULL) {
         continue;
       }
+    } else{
+      enqueue(&history, cmd_buff_tmp, -1);
     }
-
-    enqueue(&history, cmd_buff_org, -1);
 
     if (isBuiltIn(args)) {
       if (!strcmp(args[0], "cd")) {
@@ -179,13 +177,15 @@ procInfo* newProcNode(const char* cmd_buff, pid_t pid, int id) {
 // Queue operations
 void enqueue(Queue* Q, const char* cmd_buff, pid_t pid) {
   procInfo* newProc = newProcNode(cmd_buff, pid, Q->processID++);
+  Q->size++;
 
   if (Q->front == NULL) {
     Q->back = Q->front = newProc;
     return;
   }
 
-  if (Q->size >= Q->maxSize) {
+  if (Q->size > Q->maxSize) {
+    printf("Removing front!\n");
     procInfo* tmp = Q->front;
     Q->front = Q->front->next;
     free(tmp);
